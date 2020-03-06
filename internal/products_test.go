@@ -24,7 +24,7 @@ import (
 	"testing"
 )
 
-func productHelper(t *testing.T, product Product) {
+func productHelper(t *testing.T, product Product, smt bool) {
 	if product.ProductType != "base" {
 		t.Fatal("Wrong base for product")
 	}
@@ -43,7 +43,12 @@ func productHelper(t *testing.T, product Product) {
 	if product.Repositories[3].Name != "SLES12-Debuginfo-Pool" {
 		t.Fatal("Unexpected value")
 	}
-	if product.Repositories[3].URL != "https://smt.test.lan/repo/SUSE/Products/SLE-SERVER/12/x86_64/product_debug" {
+
+	expectedUrl := "https://smt.test.lan/repo/SUSE/Products/SLE-SERVER/12/x86_64/product_debug"
+	if smt {
+		expectedUrl += "?credentials=SCCcredentials"
+	}
+	if string(product.Repositories[3].URL) != expectedUrl {
 		t.Fatal("Unexpected value")
 	}
 }
@@ -88,7 +93,7 @@ func TestValidProduct(t *testing.T) {
 	if len(products) != 1 {
 		t.Fatalf("Unexpected number of products found. Got %d, expected %d", len(products), 1)
 	}
-	productHelper(t, products[0])
+	productHelper(t, products[0], false)
 }
 
 // Tests for the requestProduct function.
@@ -143,7 +148,11 @@ func TestRemoteErrorWhileRequestingProducts(t *testing.T) {
 func TestValidRequestForProduct(t *testing.T) {
 	// We setup a fake http server that mocks a registration server.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		file, err := os.Open("testdata/products-sle12.json")
+		resFile := "testdata/products-sle12.json"
+		if r.URL.Path == "/connect/systems/subscriptions" {
+			resFile = "testdata/subscriptions.json"
+		}
+		file, err := os.Open(resFile)
 		if err != nil {
 			fmt.Fprintln(w, "FAIL!")
 			return
@@ -164,5 +173,38 @@ func TestValidRequestForProduct(t *testing.T) {
 	if len(products) != 1 {
 		t.Fatalf("Unexpected number of products found. Got %d, expected %d", len(products), 1)
 	}
-	productHelper(t, products[0])
+	productHelper(t, products[0], false)
+}
+
+func TestValidRequestForProductUsingSMT(t *testing.T) {
+	// We setup a fake http server that mocks a registration server.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// SMT servers return 404 on this URL
+		if r.URL.Path == "/connect/systems/subscriptions" {
+			http.Error(w, "", http.StatusNotFound)
+		}
+		// The result also looks slightly different
+		resFile := "testdata/products-sle12-smt.json"
+		file, err := os.Open(resFile)
+		if err != nil {
+			fmt.Fprintln(w, "FAIL!")
+			return
+		}
+		io.Copy(w, file)
+		file.Close()
+	}))
+	defer ts.Close()
+
+	var cr Credentials
+	var ip InstalledProduct
+	data := SUSEConnectData{SccURL: ts.URL, Insecure: true}
+
+	products, err := RequestProducts(data, cr, ip)
+	if err != nil {
+		t.Fatal("It should've run just fine...")
+	}
+	if len(products) != 1 {
+		t.Fatalf("Unexpected number of products found. Got %d, expected %d", len(products), 1)
+	}
+	productHelper(t, products[0], true)
 }

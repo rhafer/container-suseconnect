@@ -47,6 +47,47 @@ type Product struct {
 	Name         string       `json:"name"`
 	Description  string       `json:"description"`
 }
+type SMTProduct struct {
+	Product
+	addCredentials bool
+}
+
+// Using a custom unmarshal method for the repository URL to be able to add a
+// "credentials" parameter to the URLs returned by RMT. This is somewhat
+// specific to the RMT instances available for Public Cloud on-demand
+// instances, as they need to authenticate to be able to access repositories.
+func (p *SMTProduct) UnmarshalJSON(b []byte) error {
+	var prod Product
+	err := json.Unmarshal(b, &prod)
+	if err != nil {
+		return err
+	}
+
+	p.Product = prod
+	if !p.addCredentials {
+		return nil
+	}
+
+	for i := range p.Repositories {
+		repourl, err := url.Parse(p.Repositories[i].URL)
+		if err != nil {
+			loggedError("Unable to parse repository URL: %s - %v", p.Repositories[i].URL, err)
+			return nil
+		}
+		params := repourl.Query()
+		if err != nil {
+			loggedError("Unable to parse repository URL: %s - %v", p.Repositories[i].URL, err)
+			return nil
+		}
+		if params.Get("credentials") == "" {
+			params.Add("credentials", "SCCcredentials")
+		}
+		repourl.RawQuery = params.Encode()
+		p.Repositories[i].URL = repourl.String()
+	}
+
+	return nil
+}
 
 // Parse the product as expected from the given reader. This function already
 // checks whether the given reader is valid or not.
@@ -66,11 +107,14 @@ func parseProducts(reader io.Reader) ([]Product, error) {
 	// different for both cases.
 	err = json.Unmarshal(data, &products)
 	if err != nil {
-		var product Product
+		// When connected to RMT we only got a single "Product", so let's try
+		// to unmarshall that. (And add a "credential" parameter to it if that
+		// is not present)
+		product := SMTProduct{addCredentials: true}
 		products = nil
 		err = json.Unmarshal(data, &product)
 		if err == nil {
-			products = append(products, product)
+			products = append(products, product.Product)
 		}
 	}
 	if err != nil {
@@ -110,6 +154,8 @@ func requestProductsFromRegCodeOrSystem(data SUSEConnectData, regCode string,
 		req.Header.Add("Authorization", `Token token=`+regCode)
 		req.URL.Path = "/connect/subscriptions/products"
 	} else {
+		// we're connected to a RMT, which does not provide the /connect/subscriptions/products
+		// endpoint. Fallback to "/connect/systems/products" here.
 		req.URL.Path = "/connect/systems/products"
 		auth := url.UserPassword(credentials.Username, credentials.Password)
 		req.URL.User = auth
